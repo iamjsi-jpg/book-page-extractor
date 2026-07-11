@@ -210,20 +210,24 @@ async function extractPages() {
     const video = document.createElement('video');
     video.src = state.videoUrl;
     video.muted = true;
+    video.preload = 'auto';
 
-    await new Promise((resolve) => {
-        video.addEventListener('loadedmetadata', resolve);
+    await new Promise((resolve, reject) => {
+        video.addEventListener('loadeddata', resolve, { once: true });
+        video.addEventListener('error', reject, { once: true });
+        video.load();
     });
 
     const duration = video.duration;
     const interval = parseFloat(elements.frameInterval.value);
     const threshold = parseFloat(elements.similarityThreshold.value);
-    const totalSteps = Math.floor(duration / interval);
+
+    log(`  영상 길이: ${duration.toFixed(1)}초, 간격: ${interval}초`);
 
     const canvas = elements.frameCanvas;
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
 
-    // 분석용 해상도 (성능 vs 정확도 균형)
+    // 분석용 해상도
     const analyzeWidth = 320;
     const analyzeHeight = 240;
     canvas.width = analyzeWidth;
@@ -233,11 +237,9 @@ async function extractPages() {
     const fullCanvas = elements.compareCanvas;
     const fullCtx = fullCanvas.getContext('2d', { willReadFrequently: true });
 
-    let prevPixels = null;
-    let stablePixels = null;
-    let stableCount = 0;
-    const stabilityRequired = 2;
-    let stableFullDataUrl = null;
+    // 단순화된 접근: 각 시간에 프레임을 캡처하고, 이전에 저장된 페이지와 비교
+    // 유사도가 threshold 이하면 새 페이지로 저장
+    let lastSavedPixels = null;
 
     for (let t = 0; t <= duration; t += interval) {
         // 프레임 탐색
@@ -245,6 +247,9 @@ async function extractPages() {
         await new Promise((resolve) => {
             video.addEventListener('seeked', resolve, { once: true });
         });
+
+        // 약간의 딜레이 (프레임 렌더 대기)
+        await new Promise(r => setTimeout(r, 100));
 
         // 분석용 프레임 그리기
         ctx.drawImage(video, 0, 0, analyzeWidth, analyzeHeight);
@@ -259,52 +264,32 @@ async function extractPages() {
         const progress = Math.round((t / duration) * 100);
         elements.progressExtract.style.width = `${progress}%`;
 
-        if (!prevPixels) {
-            prevPixels = currentPixels;
-            stablePixels = currentPixels;
-            stableCount = 1;
-            stableFullDataUrl = currentFullDataUrl;
+        // 첫 프레임은 무조건 저장
+        if (!lastSavedPixels) {
+            state.pages.push({
+                imageData: currentPixels,
+                dataUrl: currentFullDataUrl,
+            });
+            lastSavedPixels = currentPixels;
+            log(`  📄 페이지 ${state.pages.length} 추출 (t=${t.toFixed(1)}s)`);
             continue;
         }
 
-        const similarity = computeSSIM(currentPixels, stablePixels);
+        // 마지막으로 저장된 페이지와 비교
+        const similarity = computeSSIM(currentPixels, lastSavedPixels);
 
-        if (similarity > 0.95) {
-            // 안정적 - 같은 페이지
-            stableCount++;
-            stablePixels = currentPixels;
-            stableFullDataUrl = currentFullDataUrl;
-        } else {
-            // 변화 감지
-            if (stableCount >= stabilityRequired) {
-                // 이전 안정 프레임을 페이지로 저장 (중복 확인)
-                const isDuplicate = checkDuplicate(stablePixels, threshold);
-                if (!isDuplicate) {
-                    state.pages.push({
-                        imageData: stablePixels,
-                        dataUrl: stableFullDataUrl,
-                    });
-                    log(`  📄 페이지 ${state.pages.length} 추출 (t=${t.toFixed(1)}s)`);
-                }
+        // 유사도가 임계값보다 낮으면 = 다른 페이지
+        if (similarity < threshold) {
+            // 추가로 이미 저장된 모든 페이지와 중복 확인
+            const isDuplicate = checkDuplicate(currentPixels, threshold);
+            if (!isDuplicate) {
+                state.pages.push({
+                    imageData: currentPixels,
+                    dataUrl: currentFullDataUrl,
+                });
+                lastSavedPixels = currentPixels;
+                log(`  📄 페이지 ${state.pages.length} 추출 (t=${t.toFixed(1)}s)`);
             }
-
-            stablePixels = currentPixels;
-            stableCount = 1;
-            stableFullDataUrl = currentFullDataUrl;
-        }
-
-        prevPixels = currentPixels;
-    }
-
-    // 마지막 안정 프레임 처리
-    if (stableCount >= stabilityRequired && stablePixels) {
-        const isDuplicate = checkDuplicate(stablePixels, threshold);
-        if (!isDuplicate) {
-            state.pages.push({
-                imageData: stablePixels,
-                dataUrl: stableFullDataUrl,
-            });
-            log(`  📄 페이지 ${state.pages.length} 추출 (마지막)`);
         }
     }
 
