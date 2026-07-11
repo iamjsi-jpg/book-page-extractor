@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>책 페이지 추출기</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📖 책 페이지 추출기</h1>
+            <p class="subtitle">영상에서 책 페이지를 추출하고, 텍스트를 인식하여 Google Docs로 내보냅니다</p>
+        </header>
+
+        <!-- 1단계: 영상 업로드 -->
+        <section class="step" id="step-upload">
+            <div class="step-header">
+                <span class="step-number">1</span>
+                <h2>영상 업로드</h2>
+            </div>
+            <div class="upload-area" id="upload-area">
+                <div class="upload-content">
+                    <span class="upload-icon">🎬</span>
+                    <p>영상 파일을 드래그하거나 클릭하여 선택</p>
+                    <p class="upload-hint">MP4, MOV, AVI, WebM 지원</p>
+                </div>
+                <input type="file" id="video-input" accept="video/*" hidden>
+            </div>
+            <div id="video-info" class="video-info hidden">
+                <video id="video-preview" controls></video>
+                <div class="info-text">
+                    <p><strong>파일:</strong> <span id="file-name"></span></p>
+                    <p><strong>길이:</strong> <span id="video-duration"></span></p>
+                </div>
+            </div>
+        </section>
+
+        <!-- 2단계: 설정 -->
+        <section class="step hidden" id="step-settings">
+            <div class="step-header">
+                <span class="step-number">2</span>
+                <h2>설정</h2>
+            </div>
+            <div class="settings-grid">
+                <div class="setting-item">
+                    <label for="similarity-threshold">유사도 임계값</label>
+                    <input type="range" id="similarity-threshold" min="0.7" max="0.95" step="0.05" value="0.85">
+                    <span class="setting-value" id="threshold-value">0.85</span>
+                    <p class="setting-desc">낮을수록 큰 변화만 새 페이지로 인식</p>
+                </div>
+                <div class="setting-item">
+                    <label for="frame-interval">프레임 간격 (초)</label>
+                    <input type="range" id="frame-interval" min="0.3" max="3" step="0.1" value="1">
+                    <span class="setting-value" id="interval-value">1초</span>
+                    <p class="setting-desc">분석할 프레임 간의 시간 간격</p>
+                </div>
+                <div class="setting-item">
+                    <label for="ocr-lang">OCR 언어</label>
+                    <select id="ocr-lang">
+                        <option value="kor+eng">한국어 + 영어</option>
+                        <option value="kor">한국어만</option>
+                        <option value="eng">영어만</option>
+                        <option value="jpn+eng">일본어 + 영어</option>
+                        <option value="chi_sim+eng">중국어(간체) + 영어</option>
+                    </select>
+                    <p class="setting-desc">텍스트 인식에 사용할 언어</p>
+                </div>
+                <div class="setting-item">
+                    <label for="doc-title">문서 제목</label>
+                    <input type="text" id="doc-title" placeholder="추출된 책 내용" value="추출된 책 내용">
+                    <p class="setting-desc">Google Docs 문서 제목</p>
+                </div>
+            </div>
+            <button class="btn-primary" id="btn-start">페이지 추출 시작</button>
+        </section>
+
+        <!-- 3단계: 처리 중 -->
+        <section class="step hidden" id="step-processing">
+            <div class="step-header">
+                <span class="step-number">3</span>
+                <h2>처리 중</h2>
+            </div>
+            <div class="progress-container">
+                <div class="progress-stage" id="stage-extract">
+                    <span class="stage-icon">🎞️</span>
+                    <span class="stage-text">페이지 추출</span>
+                    <span class="stage-status" id="status-extract">대기중</span>
+                </div>
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progress-extract"></div>
+                </div>
+
+                <div class="progress-stage" id="stage-ocr">
+                    <span class="stage-icon">🔍</span>
+                    <span class="stage-text">텍스트 인식 (OCR)</span>
+                    <span class="stage-status" id="status-ocr">대기중</span>
+                </div>
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progress-ocr"></div>
+                </div>
+            </div>
+            <div class="log-area" id="log-area">
+                <p class="log-placeholder">처리 로그가 여기에 표시됩니다...</p>
+            </div>
+        </section>
+
+        <!-- 4단계: 결과 -->
+        <section class="step hidden" id="step-result">
+            <div class="step-header">
+                <span class="step-number">4</span>
+                <h2>결과</h2>
+            </div>
+            <div class="result-summary">
+                <div class="result-stat">
+                    <span class="stat-number" id="result-pages">0</span>
+                    <span class="stat-label">추출된 페이지</span>
+                </div>
+                <div class="result-stat">
+                    <span class="stat-number" id="result-chars">0</span>
+                    <span class="stat-label">인식된 글자</span>
+                </div>
+            </div>
+
+            <div class="result-pages" id="result-pages-grid"></div>
+
+            <div class="result-actions">
+                <button class="btn-primary" id="btn-upload-gdocs">
+                    📄 Google Docs에 업로드
+                </button>
+                <button class="btn-secondary" id="btn-download-txt">
+                    💾 텍스트 파일 다운로드
+                </button>
+                <button class="btn-secondary" id="btn-restart">
+                    🔄 다시 시작
+                </button>
+            </div>
+        </section>
+    </div>
+
+    <!-- 숨겨진 캔버스 (프레임 처리용) -->
+    <canvas id="frame-canvas" hidden></canvas>
+    <canvas id="compare-canvas" hidden></canvas>
+
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+    <script src="https://apis.google.com/js/api.js"></script>
+    <script src="https://accounts.google.com/gsi/client"></script>
+    <script src="app.js"></script>
+</body>
+</html>
