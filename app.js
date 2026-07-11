@@ -10,7 +10,7 @@
 // ============================================================
 // 아래 CLIENT_ID를 본인의 Google Cloud OAuth 2.0 클라이언트 ID로 교체하세요.
 // API_KEY는 Google Cloud Console에서 발급받은 API 키로 교체하세요.
-const GOOGLE_CLIENT_ID = 'YOUR_CLIENT_ID.apps.googleusercontent.com';
+const GOOGLE_CLIENT_ID = '659226329113-gtt1ucguk8imff0nstvk99qij6up7731.apps.googleusercontent.com';
 const GOOGLE_API_KEY = 'YOUR_API_KEY';
 const SCOPES = 'https://www.googleapis.com/auth/documents';
 
