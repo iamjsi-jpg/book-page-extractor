@@ -13,6 +13,8 @@
 const GOOGLE_CLIENT_ID = '659226329113-gtt1ucguk8imff0nstvk99qij6up7731.apps.googleusercontent.com';
 const GOOGLE_API_KEY = 'YOUR_API_KEY';
 const SCOPES = 'https://www.googleapis.com/auth/documents';
+// Cloud Vision API 키 (OCR용) - 위 API_KEY와 동일하게 사용 가능
+const VISION_API_KEY = 'AIzaSyA_JZJrMd8ybmWHftR7HczBwLdmvcWJQ0A';
 
 // ============================================================
 // 상태 관리
@@ -353,20 +355,15 @@ function computeSSIM(imgData1, imgData2) {
 }
 
 // ============================================================
-// OCR (Tesseract.js)
+// OCR (Google Cloud Vision API)
 // ============================================================
 async function performOCR() {
-    const lang = elements.ocrLang.value;
-    log(`  언어: ${lang}`);
+    if (VISION_API_KEY === 'YOUR_VISION_API_KEY') {
+        alert('Cloud Vision API 키가 설정되지 않았습니다.\napp.js 상단의 VISION_API_KEY를 교체하세요.');
+        return;
+    }
 
-    const worker = await Tesseract.createWorker(lang, 1, {
-        logger: (m) => {
-            if (m.status === 'recognizing text') {
-                const pageProgress = Math.round(m.progress * 100);
-                // 개별 페이지 내 진행률은 빈번하므로 로그 생략
-            }
-        }
-    });
+    log(`  Google Cloud Vision API 사용`);
 
     for (let i = 0; i < state.pages.length; i++) {
         const page = state.pages[i];
@@ -376,15 +373,40 @@ async function performOCR() {
         log(`  [${i + 1}/${state.pages.length}] 페이지 ${i + 1} OCR 처리 중...`);
 
         try {
-            const { data: { text } } = await worker.recognize(page.dataUrl);
-            const cleanedText = text.trim();
+            // dataUrl에서 base64 부분만 추출
+            const base64Image = page.dataUrl.split(',')[1];
 
-            if (cleanedText) {
+            const requestBody = {
+                requests: [{
+                    image: { content: base64Image },
+                    features: [{ type: 'TEXT_DETECTION' }],
+                }]
+            };
+
+            const response = await fetch(
+                `https://vision.googleapis.com/v1/images:annotate?key=${VISION_API_KEY}`,
+                {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(requestBody),
+                }
+            );
+
+            if (!response.ok) {
+                const errData = await response.json();
+                throw new Error(errData.error?.message || `API 오류: ${response.status}`);
+            }
+
+            const data = await response.json();
+            const annotation = data.responses[0]?.fullTextAnnotation;
+            const text = annotation?.text?.trim() || '';
+
+            if (text) {
                 state.pageTexts.push({
                     pageNum: i + 1,
-                    text: cleanedText,
+                    text: text,
                 });
-                log(`    → ${cleanedText.length}자 인식됨`);
+                log(`    → ${text.length}자 인식됨`);
             } else {
                 log(`    → 텍스트를 인식하지 못했습니다`);
             }
@@ -393,7 +415,6 @@ async function performOCR() {
         }
     }
 
-    await worker.terminate();
     log(`✅ OCR 완료: ${state.pageTexts.length}개 페이지에서 텍스트 인식 성공`);
 }
 
