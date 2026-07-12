@@ -206,7 +206,7 @@ async function startProcessing() {
 }
 
 // ============================================================
-// 페이지 추출 (SSIM 기반 중복 감지)
+// 페이지 추출 (SSIM 기반 중복 감지 + 안정화)
 // ============================================================
 async function extractPages() {
     const video = document.createElement('video');
@@ -229,35 +229,32 @@ async function extractPages() {
     const canvas = elements.frameCanvas;
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
 
-    // 분석용 해상도
     const analyzeWidth = 320;
     const analyzeHeight = 240;
     canvas.width = analyzeWidth;
     canvas.height = analyzeHeight;
 
-    // 원본 해상도 캡처용 캔버스
     const fullCanvas = elements.compareCanvas;
     const fullCtx = fullCanvas.getContext('2d', { willReadFrequently: true });
 
-    // 단순화된 접근: 각 시간에 프레임을 캡처하고, 이전에 저장된 페이지와 비교
-    // 유사도가 threshold 이하면 새 페이지로 저장
+    // 안정화 로직: 연속 2회 이상 동일하면 "안정된 페이지"로 인정
     let lastSavedPixels = null;
+    let prevPixels = null;
+    let stablePixels = null;
+    let stableFullDataUrl = null;
+    let stableCount = 0;
+    const stabilityRequired = 2;
 
     for (let t = 0; t <= duration; t += interval) {
-        // 프레임 탐색
         video.currentTime = t;
         await new Promise((resolve) => {
             video.addEventListener('seeked', resolve, { once: true });
         });
+        await new Promise(r => setTimeout(r, 150));
 
-        // 약간의 딜레이 (프레임 렌더 대기)
-        await new Promise(r => setTimeout(r, 100));
-
-        // 분석용 프레임 그리기
         ctx.drawImage(video, 0, 0, analyzeWidth, analyzeHeight);
         const currentPixels = ctx.getImageData(0, 0, analyzeWidth, analyzeHeight);
 
-        // 원본 해상도 프레임
         fullCanvas.width = video.videoWidth;
         fullCanvas.height = video.videoHeight;
         fullCtx.drawImage(video, 0, 0);
@@ -266,36 +263,57 @@ async function extractPages() {
         const progress = Math.round((t / duration) * 100);
         elements.progressExtract.style.width = `${progress}%`;
 
-        // 첫 프레임은 무조건 저장
-        if (!lastSavedPixels) {
-            state.pages.push({
-                imageData: currentPixels,
-                dataUrl: currentFullDataUrl,
-            });
-            lastSavedPixels = currentPixels;
-            log(`  📄 페이지 ${state.pages.length} 추출 (t=${t.toFixed(1)}s)`);
+        if (!prevPixels) {
+            prevPixels = currentPixels;
+            stablePixels = currentPixels;
+            stableFullDataUrl = currentFullDataUrl;
+            stableCount = 1;
             continue;
         }
 
-        // 마지막으로 저장된 페이지와 비교
-        const similarity = computeSSIM(currentPixels, lastSavedPixels);
+        // 이전 프레임과의 유사도 (안정화 확인용)
+        const simWithPrev = computeSSIM(currentPixels, prevPixels);
 
-        // 유사도가 임계값보다 낮으면 = 다른 페이지
-        if (similarity < threshold) {
-            // 추가로 이미 저장된 모든 페이지와 중복 확인
-            const isDuplicate = checkDuplicate(currentPixels, threshold);
-            if (!isDuplicate) {
-                state.pages.push({
-                    imageData: currentPixels,
-                    dataUrl: currentFullDataUrl,
-                });
-                lastSavedPixels = currentPixels;
-                log(`  📄 페이지 ${state.pages.length} 추출 (t=${t.toFixed(1)}s)`);
+        if (simWithPrev > 0.93) {
+            // 이전 프레임과 거의 같음 → 안정 상태 유지
+            stableCount++;
+            stablePixels = currentPixels;
+            stableFullDataUrl = currentFullDataUrl;
+        } else {
+            // 변화 감지됨 → 이전 안정 프레임을 페이지로 저장 시도
+            if (stableCount >= stabilityRequired && stablePixels) {
+                saveStablePage(stablePixels, stableFullDataUrl, threshold, t);
             }
+            // 새 안정화 시작
+            stableCount = 1;
+            stablePixels = currentPixels;
+            stableFullDataUrl = currentFullDataUrl;
         }
+
+        prevPixels = currentPixels;
+    }
+
+    // 마지막 안정 프레임 저장
+    if (stableCount >= stabilityRequired && stablePixels) {
+        saveStablePage(stablePixels, stableFullDataUrl, threshold, duration);
     }
 
     log(`✅ 총 ${state.pages.length}개의 고유 페이지를 추출했습니다.`);
+}
+
+/**
+ * 안정된 프레임을 중복 확인 후 페이지로 저장합니다.
+ */
+function saveStablePage(pixels, dataUrl, threshold, t) {
+    // 이미 저장된 페이지와 중복 확인
+    const isDuplicate = checkDuplicate(pixels, threshold);
+    if (!isDuplicate) {
+        state.pages.push({
+            imageData: pixels,
+            dataUrl: dataUrl,
+        });
+        log(`  📄 페이지 ${state.pages.length} 추출 (t=${t.toFixed(1)}s)`);
+    }
 }
 
 /**
@@ -355,7 +373,7 @@ function computeSSIM(imgData1, imgData2) {
 }
 
 // ============================================================
-// OCR (Google Cloud Vision API)
+// OCR (Google Cloud Vision API) + 페이지 번호 자동 감지
 // ============================================================
 async function performOCR() {
     if (VISION_API_KEY === 'YOUR_VISION_API_KEY') {
@@ -370,10 +388,9 @@ async function performOCR() {
         const progress = Math.round(((i + 1) / state.pages.length) * 100);
         elements.progressOcr.style.width = `${progress}%`;
 
-        log(`  [${i + 1}/${state.pages.length}] 페이지 ${i + 1} OCR 처리 중...`);
+        log(`  [${i + 1}/${state.pages.length}] 페이지 OCR 처리 중...`);
 
         try {
-            // dataUrl에서 base64 부분만 추출
             const base64Image = page.dataUrl.split(',')[1];
 
             const requestBody = {
@@ -402,11 +419,18 @@ async function performOCR() {
             const text = annotation?.text?.trim() || '';
 
             if (text) {
+                // 텍스트에서 실제 책 페이지 번호 추출 시도
+                const detectedPageNum = detectPageNumber(text);
+
                 state.pageTexts.push({
-                    pageNum: i + 1,
+                    pageNum: detectedPageNum || (i + 1),
+                    detectedNum: detectedPageNum,
+                    sequenceNum: i + 1,
                     text: text,
                 });
-                log(`    → ${text.length}자 인식됨`);
+
+                const pageLabel = detectedPageNum ? `p.${detectedPageNum}` : `#${i + 1}`;
+                log(`    → ${text.length}자 인식됨 (${pageLabel})`);
             } else {
                 log(`    → 텍스트를 인식하지 못했습니다`);
             }
@@ -415,7 +439,54 @@ async function performOCR() {
         }
     }
 
+    // 감지된 페이지 번호가 있으면 정렬
+    const withPageNum = state.pageTexts.filter(p => p.detectedNum);
+    if (withPageNum.length > state.pageTexts.length * 0.5) {
+        // 50% 이상 페이지 번호를 감지했으면 번호순 정렬
+        state.pageTexts.sort((a, b) => (a.pageNum || 9999) - (b.pageNum || 9999));
+        log(`  📋 책 페이지 번호 기준으로 정렬 완료 (${withPageNum.length}개 감지)`);
+    }
+
     log(`✅ OCR 완료: ${state.pageTexts.length}개 페이지에서 텍스트 인식 성공`);
+}
+
+/**
+ * OCR 텍스트에서 실제 책 페이지 번호를 감지합니다.
+ * 보통 페이지 상단이나 하단에 숫자만 단독으로 있는 경우가 많습니다.
+ */
+function detectPageNumber(text) {
+    const lines = text.split('\n').map(l => l.trim()).filter(l => l);
+
+    // 첫 3줄과 마지막 3줄에서 숫자만 있는 줄을 찾기
+    const candidates = [];
+
+    // 상단 검색
+    for (let i = 0; i < Math.min(3, lines.length); i++) {
+        const num = parsePageNum(lines[i]);
+        if (num) candidates.push(num);
+    }
+
+    // 하단 검색
+    for (let i = Math.max(0, lines.length - 3); i < lines.length; i++) {
+        const num = parsePageNum(lines[i]);
+        if (num) candidates.push(num);
+    }
+
+    // 가장 합리적인 페이지 번호 반환 (1~9999 범위)
+    const valid = candidates.filter(n => n >= 1 && n <= 9999);
+    return valid.length > 0 ? valid[0] : null;
+}
+
+/**
+ * 문자열이 페이지 번호인지 판단합니다.
+ */
+function parsePageNum(line) {
+    // "- 42 -", "42", "| 42 |", "제42쪽" 등의 패턴
+    const cleaned = line.replace(/[-|—_·.페이지쪽p\s]/gi, '').trim();
+    if (/^\d{1,4}$/.test(cleaned)) {
+        return parseInt(cleaned, 10);
+    }
+    return null;
 }
 
 // ============================================================
@@ -429,17 +500,23 @@ function showResults() {
     const totalChars = state.pageTexts.reduce((sum, p) => sum + p.text.length, 0);
     elements.resultChars.textContent = totalChars.toLocaleString();
 
-    // 페이지 그리드
+    // 페이지 그리드 (페이지 번호 + 내용 미리보기)
     elements.resultPagesGrid.innerHTML = '';
-    state.pages.forEach((page, idx) => {
-        const pageText = state.pageTexts.find(p => p.pageNum === idx + 1);
+    state.pageTexts.forEach((pageText) => {
+        const pageIdx = pageText.sequenceNum - 1;
+        const page = state.pages[pageIdx];
+        const pageLabel = pageText.detectedNum ? `p.${pageText.detectedNum}` : `#${pageText.sequenceNum}`;
+        // 내용 미리보기: 첫 2줄
+        const previewLines = pageText.text.split('\n').filter(l => l.trim()).slice(0, 2).join(' ');
+        const preview = previewLines.length > 60 ? previewLines.substring(0, 60) + '...' : previewLines;
+
         const card = document.createElement('div');
         card.className = 'page-card';
         card.innerHTML = `
-            <img src="${page.dataUrl}" alt="페이지 ${idx + 1}">
+            <img src="${page ? page.dataUrl : ''}" alt="페이지 ${pageLabel}">
             <div class="page-card-info">
-                <h4>페이지 ${idx + 1}</h4>
-                <p>${pageText ? pageText.text.substring(0, 50) + '...' : '텍스트 없음'}</p>
+                <h4>페이지 ${pageLabel}</h4>
+                <p>${preview || '텍스트 없음'}</p>
             </div>
         `;
         elements.resultPagesGrid.appendChild(card);
@@ -487,8 +564,9 @@ async function uploadToGoogleDocs() {
 
         // 텍스트 삽입
         let fullContent = '';
-        for (const { pageNum, text } of state.pageTexts) {
-            fullContent += `── 페이지 ${pageNum} ──\n\n${text}\n\n\n`;
+        for (const { pageNum, detectedNum, text } of state.pageTexts) {
+            const pageLabel = detectedNum ? `페이지 ${detectedNum}` : `페이지 #${pageNum}`;
+            fullContent += `── ${pageLabel} ──\n\n${text}\n\n\n`;
         }
 
         const requests = [{
@@ -571,8 +649,9 @@ function downloadAsText() {
     }
 
     let content = '';
-    for (const { pageNum, text } of state.pageTexts) {
-        content += `=== 페이지 ${pageNum} ===\n`;
+    for (const { pageNum, detectedNum, text } of state.pageTexts) {
+        const pageLabel = detectedNum ? `페이지 ${detectedNum}` : `페이지 #${pageNum}`;
+        content += `=== ${pageLabel} ===\n`;
         content += text;
         content += '\n\n';
     }
