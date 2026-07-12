@@ -206,7 +206,7 @@ async function startProcessing() {
 }
 
 // ============================================================
-// 페이지 추출 (SSIM 기반 중복 감지 + 안정화)
+// 페이지 추출 (SSIM 기반 중복 감지 + 전환 프레임 필터링)
 // ============================================================
 async function extractPages() {
     const video = document.createElement('video');
@@ -237,92 +237,90 @@ async function extractPages() {
     const fullCanvas = elements.compareCanvas;
     const fullCtx = fullCanvas.getContext('2d', { willReadFrequently: true });
 
-    let lastSavedPixels = null;
-    let prevPixels = null;
-    let stablePixels = null;
-    let stableFullDataUrl = null;
-    let stableCount = 0;
-    const stabilityRequired = 2;
-    let firstPageSaved = false;
+    // 1차: 모든 프레임 수집
+    log(`  프레임 수집 중...`);
+    const frames = [];
 
     for (let t = 0; t <= duration; t += interval) {
         video.currentTime = t;
         await new Promise((resolve) => {
             video.addEventListener('seeked', resolve, { once: true });
         });
-        await new Promise(r => setTimeout(r, 150));
+        await new Promise(r => setTimeout(r, 100));
 
         ctx.drawImage(video, 0, 0, analyzeWidth, analyzeHeight);
-        const currentPixels = ctx.getImageData(0, 0, analyzeWidth, analyzeHeight);
+        const pixels = ctx.getImageData(0, 0, analyzeWidth, analyzeHeight);
 
         fullCanvas.width = video.videoWidth;
         fullCanvas.height = video.videoHeight;
         fullCtx.drawImage(video, 0, 0);
-        const currentFullDataUrl = fullCanvas.toDataURL('image/png');
+        const fullDataUrl = fullCanvas.toDataURL('image/png');
 
-        const progress = Math.round((t / duration) * 100);
+        frames.push({ t, pixels, fullDataUrl });
+
+        const progress = Math.round((t / duration) * 50);
+        elements.progressExtract.style.width = `${progress}%`;
+    }
+
+    log(`  ${frames.length}개 프레임 수집 완료. 페이지 선별 중...`);
+
+    // 2차: 연속 프레임 비교로 안정 구간 찾기 → 전환 중 프레임 제외
+    // 방법: 앞뒤 프레임과의 유사도가 모두 높은 프레임 = 안정 프레임
+    const stableFrames = [];
+    for (let i = 0; i < frames.length; i++) {
+        let isStable = true;
+
+        // 다음 프레임과 비교 (있는 경우)
+        if (i < frames.length - 1) {
+            const simNext = computeSSIM(frames[i].pixels, frames[i + 1].pixels);
+            if (simNext < 0.9) isStable = false; // 다음 프레임과 많이 다르면 전환 중
+        }
+
+        // 이전 프레임과 비교 (있는 경우)
+        if (i > 0) {
+            const simPrev = computeSSIM(frames[i].pixels, frames[i - 1].pixels);
+            if (simPrev < 0.9) isStable = false; // 이전 프레임과 많이 다르면 전환 중
+        }
+
+        if (isStable) {
+            stableFrames.push(frames[i]);
+        }
+    }
+
+    log(`  안정 프레임: ${stableFrames.length}개 (전환 중 ${frames.length - stableFrames.length}개 제외)`);
+
+    // 3차: 안정 프레임에서 고유 페이지 추출
+    let lastSavedPixels = null;
+
+    for (let i = 0; i < stableFrames.length; i++) {
+        const frame = stableFrames[i];
+
+        const progress = 50 + Math.round((i / stableFrames.length) * 50);
         elements.progressExtract.style.width = `${progress}%`;
 
-        if (!prevPixels) {
-            prevPixels = currentPixels;
-            stablePixels = currentPixels;
-            stableFullDataUrl = currentFullDataUrl;
-            stableCount = 1;
+        if (!lastSavedPixels) {
+            // 첫 프레임 무조건 저장
+            state.pages.push({
+                imageData: frame.pixels,
+                dataUrl: frame.fullDataUrl,
+            });
+            lastSavedPixels = frame.pixels;
+            log(`  📄 페이지 ${state.pages.length} 추출 (t=${frame.t.toFixed(1)}s)`);
             continue;
         }
 
-        const simWithPrev = computeSSIM(currentPixels, prevPixels);
+        const similarity = computeSSIM(frame.pixels, lastSavedPixels);
 
-        if (simWithPrev > 0.93) {
-            stableCount++;
-            stablePixels = currentPixels;
-            stableFullDataUrl = currentFullDataUrl;
-
-            // 첫 안정 프레임은 무조건 저장
-            if (!firstPageSaved && stableCount >= stabilityRequired) {
-                state.pages.push({
-                    imageData: stablePixels,
-                    dataUrl: stableFullDataUrl,
-                });
-                lastSavedPixels = stablePixels;
-                firstPageSaved = true;
-                log(`  📄 페이지 ${state.pages.length} 추출 (t=${t.toFixed(1)}s)`);
-            }
-        } else {
-            // 변화 감지 → 이전 안정 프레임을 페이지로 저장 시도
-            if (stableCount >= stabilityRequired && stablePixels) {
-                if (!lastSavedPixels || computeSSIM(stablePixels, lastSavedPixels) < threshold) {
-                    const isDuplicate = checkDuplicate(stablePixels, threshold);
-                    if (!isDuplicate) {
-                        state.pages.push({
-                            imageData: stablePixels,
-                            dataUrl: stableFullDataUrl,
-                        });
-                        lastSavedPixels = stablePixels;
-                        firstPageSaved = true;
-                        log(`  📄 페이지 ${state.pages.length} 추출 (t=${t.toFixed(1)}s)`);
-                    }
-                }
-            }
-            // 새 안정화 시작
-            stableCount = 1;
-            stablePixels = currentPixels;
-            stableFullDataUrl = currentFullDataUrl;
-        }
-
-        prevPixels = currentPixels;
-    }
-
-    // 마지막 안정 프레임 저장
-    if (stableCount >= stabilityRequired && stablePixels) {
-        if (!lastSavedPixels || computeSSIM(stablePixels, lastSavedPixels) < threshold) {
-            const isDuplicate = checkDuplicate(stablePixels, threshold);
+        if (similarity < threshold) {
+            // 이미 저장된 페이지와 중복 확인
+            const isDuplicate = checkDuplicate(frame.pixels, threshold);
             if (!isDuplicate) {
                 state.pages.push({
-                    imageData: stablePixels,
-                    dataUrl: stableFullDataUrl,
+                    imageData: frame.pixels,
+                    dataUrl: frame.fullDataUrl,
                 });
-                log(`  📄 페이지 ${state.pages.length} 추출 (마지막)`);
+                lastSavedPixels = frame.pixels;
+                log(`  📄 페이지 ${state.pages.length} 추출 (t=${frame.t.toFixed(1)}s)`);
             }
         }
     }
