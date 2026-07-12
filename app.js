@@ -237,13 +237,13 @@ async function extractPages() {
     const fullCanvas = elements.compareCanvas;
     const fullCtx = fullCanvas.getContext('2d', { willReadFrequently: true });
 
-    // 안정화 로직: 연속 2회 이상 동일하면 "안정된 페이지"로 인정
     let lastSavedPixels = null;
     let prevPixels = null;
     let stablePixels = null;
     let stableFullDataUrl = null;
     let stableCount = 0;
     const stabilityRequired = 2;
+    let firstPageSaved = false;
 
     for (let t = 0; t <= duration; t += interval) {
         video.currentTime = t;
@@ -271,18 +271,38 @@ async function extractPages() {
             continue;
         }
 
-        // 이전 프레임과의 유사도 (안정화 확인용)
         const simWithPrev = computeSSIM(currentPixels, prevPixels);
 
         if (simWithPrev > 0.93) {
-            // 이전 프레임과 거의 같음 → 안정 상태 유지
             stableCount++;
             stablePixels = currentPixels;
             stableFullDataUrl = currentFullDataUrl;
+
+            // 첫 안정 프레임은 무조건 저장
+            if (!firstPageSaved && stableCount >= stabilityRequired) {
+                state.pages.push({
+                    imageData: stablePixels,
+                    dataUrl: stableFullDataUrl,
+                });
+                lastSavedPixels = stablePixels;
+                firstPageSaved = true;
+                log(`  📄 페이지 ${state.pages.length} 추출 (t=${t.toFixed(1)}s)`);
+            }
         } else {
-            // 변화 감지됨 → 이전 안정 프레임을 페이지로 저장 시도
+            // 변화 감지 → 이전 안정 프레임을 페이지로 저장 시도
             if (stableCount >= stabilityRequired && stablePixels) {
-                saveStablePage(stablePixels, stableFullDataUrl, threshold, t);
+                if (!lastSavedPixels || computeSSIM(stablePixels, lastSavedPixels) < threshold) {
+                    const isDuplicate = checkDuplicate(stablePixels, threshold);
+                    if (!isDuplicate) {
+                        state.pages.push({
+                            imageData: stablePixels,
+                            dataUrl: stableFullDataUrl,
+                        });
+                        lastSavedPixels = stablePixels;
+                        firstPageSaved = true;
+                        log(`  📄 페이지 ${state.pages.length} 추출 (t=${t.toFixed(1)}s)`);
+                    }
+                }
             }
             // 새 안정화 시작
             stableCount = 1;
@@ -295,7 +315,16 @@ async function extractPages() {
 
     // 마지막 안정 프레임 저장
     if (stableCount >= stabilityRequired && stablePixels) {
-        saveStablePage(stablePixels, stableFullDataUrl, threshold, duration);
+        if (!lastSavedPixels || computeSSIM(stablePixels, lastSavedPixels) < threshold) {
+            const isDuplicate = checkDuplicate(stablePixels, threshold);
+            if (!isDuplicate) {
+                state.pages.push({
+                    imageData: stablePixels,
+                    dataUrl: stableFullDataUrl,
+                });
+                log(`  📄 페이지 ${state.pages.length} 추출 (마지막)`);
+            }
+        }
     }
 
     log(`✅ 총 ${state.pages.length}개의 고유 페이지를 추출했습니다.`);
@@ -305,7 +334,6 @@ async function extractPages() {
  * 안정된 프레임을 중복 확인 후 페이지로 저장합니다.
  */
 function saveStablePage(pixels, dataUrl, threshold, t) {
-    // 이미 저장된 페이지와 중복 확인
     const isDuplicate = checkDuplicate(pixels, threshold);
     if (!isDuplicate) {
         state.pages.push({
